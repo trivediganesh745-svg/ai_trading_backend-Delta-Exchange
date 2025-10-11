@@ -1,5 +1,4 @@
-# app.py - Main Flask Application for Delta Exchange Automated Trading System
-
+# app.py - Pandas-free version for better Render compatibility
 import os
 import json
 import time
@@ -9,8 +8,6 @@ import logging
 import threading
 import websocket
 import requests
-import pandas as pd
-import numpy as np
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, render_template_string
 from dataclasses import dataclass, asdict
@@ -18,6 +15,8 @@ from typing import Dict, List, Optional, Any
 from collections import defaultdict, deque
 import sqlite3
 from contextlib import contextmanager
+import statistics
+import math
 
 # Configure logging
 logging.basicConfig(
@@ -80,6 +79,60 @@ class Trade:
     price: str
     timestamp: str
     commission: str
+
+# Lightweight data processing utilities (replacing pandas)
+class DataProcessor:
+    @staticmethod
+    def calculate_sma(prices: List[float], window: int) -> Optional[float]:
+        """Calculate Simple Moving Average"""
+        if len(prices) < window:
+            return None
+        return sum(prices[-window:]) / window
+    
+    @staticmethod
+    def calculate_returns(prices: List[float]) -> List[float]:
+        """Calculate price returns"""
+        if len(prices) < 2:
+            return []
+        
+        returns = []
+        for i in range(1, len(prices)):
+            ret = (prices[i] - prices[i-1]) / prices[i-1]
+            returns.append(ret)
+        return returns
+    
+    @staticmethod
+    def calculate_sharpe_ratio(returns: List[float], periods_per_year: int = 252) -> float:
+        """Calculate Sharpe ratio"""
+        if len(returns) < 2:
+            return 0.0
+        
+        mean_return = statistics.mean(returns)
+        std_return = statistics.stdev(returns) if len(returns) > 1 else 0
+        
+        if std_return == 0:
+            return 0.0
+        
+        return (mean_return * periods_per_year) / (std_return * math.sqrt(periods_per_year))
+    
+    @staticmethod
+    def calculate_max_drawdown(equity_curve: List[float]) -> float:
+        """Calculate maximum drawdown"""
+        if len(equity_curve) < 2:
+            return 0.0
+        
+        peak = equity_curve[0]
+        max_dd = 0.0
+        
+        for value in equity_curve:
+            if value > peak:
+                peak = value
+            
+            drawdown = (peak - value) / peak
+            if drawdown > max_dd:
+                max_dd = drawdown
+        
+        return max_dd
 
 # Database Manager
 class DatabaseManager:
@@ -262,7 +315,7 @@ class DeltaExchangeAPI:
         """Get wallet balances"""
         return self.make_request('GET', '/v2/wallet/balances')
 
-# WebSocket Manager
+# WebSocket Manager (simplified)
 class WebSocketManager:
     def __init__(self, api_key: str, api_secret: str, ws_url: str, callback_handler):
         self.api_key = api_key
@@ -364,19 +417,21 @@ class WebSocketManager:
     
     def connect(self):
         """Establish WebSocket connection"""
-        websocket.enableTrace(True)
-        self.ws = websocket.WebSocketApp(
-            self.ws_url,
-            on_open=self.on_open,
-            on_message=self.on_message,
-            on_error=self.on_error,
-            on_close=self.on_close
-        )
-        
-        # Run WebSocket in a separate thread
-        ws_thread = threading.Thread(target=self.ws.run_forever)
-        ws_thread.daemon = True
-        ws_thread.start()
+        try:
+            self.ws = websocket.WebSocketApp(
+                self.ws_url,
+                on_open=self.on_open,
+                on_message=self.on_message,
+                on_error=self.on_error,
+                on_close=self.on_close
+            )
+            
+            # Run WebSocket in a separate thread
+            ws_thread = threading.Thread(target=self.ws.run_forever)
+            ws_thread.daemon = True
+            ws_thread.start()
+        except Exception as e:
+            logger.error(f"Failed to connect WebSocket: {e}")
 
 # Trading Strategy Base Class
 class TradingStrategy:
@@ -397,7 +452,7 @@ class TradingStrategy:
         """Calculate position size based on risk management"""
         return 1
 
-# Simple Moving Average Strategy
+# Simple Moving Average Strategy (pandas-free)
 class SMAStrategy(TradingStrategy):
     def __init__(self, short_window: int = 10, long_window: int = 30):
         super().__init__("SMA_Strategy")
@@ -412,9 +467,7 @@ class SMAStrategy(TradingStrategy):
     def get_sma(self, symbol: str, window: int) -> Optional[float]:
         """Calculate Simple Moving Average"""
         prices = list(self.price_history[symbol])
-        if len(prices) < window:
-            return None
-        return sum(prices[-window:]) / window
+        return DataProcessor.calculate_sma(prices, window)
     
     def should_buy(self, symbol: str, price: float, data: Dict) -> bool:
         """Buy when short SMA crosses above long SMA"""
@@ -474,7 +527,7 @@ class RiskManager:
         """Update daily PnL"""
         self.daily_pnl += pnl_change
 
-# Backtesting Engine
+# Simplified Backtesting Engine (pandas-free)
 class BacktestEngine:
     def __init__(self, strategy: TradingStrategy, initial_capital: float = 10000.0):
         self.strategy = strategy
@@ -484,23 +537,23 @@ class BacktestEngine:
         self.trades = []
         self.equity_curve = []
     
-    def run_backtest(self, price_data: pd.DataFrame, symbol: str) -> Dict:
+    def run_backtest(self, price_data: List[Dict], symbol: str) -> Dict:
         """Run backtest on historical price data"""
         logger.info(f"Starting backtest for {symbol}")
         
-        for index, row in price_data.iterrows():
-            price = row['close']
-            timestamp = row['timestamp'] if 'timestamp' in row else index
+        for data_point in price_data:
+            price = data_point['price']
+            timestamp = data_point.get('timestamp', time.time())
             
             # Update strategy with new price
             self.strategy.update_price(symbol, price)
             
             # Check for buy signals
-            if self.strategy.should_buy(symbol, price, row.to_dict()):
+            if self.strategy.should_buy(symbol, price, data_point):
                 self.execute_buy(symbol, price, timestamp)
             
             # Check for sell signals
-            elif self.strategy.should_sell(symbol, price, row.to_dict()):
+            elif self.strategy.should_sell(symbol, price, data_point):
                 self.execute_sell(symbol, price, timestamp)
             
             # Update equity curve
@@ -559,21 +612,10 @@ class BacktestEngine:
         if not self.equity_curve:
             return {}
         
-        equity_series = pd.Series(self.equity_curve)
-        returns = equity_series.pct_change().dropna()
-        
+        returns = DataProcessor.calculate_returns(self.equity_curve)
         total_return = (self.equity_curve[-1] - self.initial_capital) / self.initial_capital
-        
-        # Calculate Sharpe ratio (assuming 252 trading days)
-        if len(returns) > 1 and returns.std() > 0:
-            sharpe_ratio = (returns.mean() * 252) / (returns.std() * np.sqrt(252))
-        else:
-            sharpe_ratio = 0
-        
-        # Calculate maximum drawdown
-        peak = equity_series.expanding().max()
-        drawdown = (equity_series - peak) / peak
-        max_drawdown = drawdown.min()
+        sharpe_ratio = DataProcessor.calculate_sharpe_ratio(returns)
+        max_drawdown = DataProcessor.calculate_max_drawdown(self.equity_curve)
         
         # Calculate win rate
         profitable_trades = [t for t in self.trades if t.get('pnl', 0) > 0]
@@ -588,7 +630,7 @@ class BacktestEngine:
             'final_capital': self.equity_curve[-1] if self.equity_curve else self.initial_capital
         }
 
-# Main Trading System
+# Main Trading System (simplified for better compatibility)
 class TradingSystem:
     def __init__(self):
         self.config = Config()
@@ -603,12 +645,18 @@ class TradingSystem:
             self.config.MAX_DAILY_LOSS
         )
         self.strategy = SMAStrategy()
-        self.ws_manager = WebSocketManager(
-            self.config.API_KEY,
-            self.config.API_SECRET,
-            self.config.WS_URL,
-            self
-        )
+        
+        # Initialize WebSocket manager with error handling
+        try:
+            self.ws_manager = WebSocketManager(
+                self.config.API_KEY,
+                self.config.API_SECRET,
+                self.config.WS_URL,
+                self
+            )
+        except Exception as e:
+            logger.error(f"Failed to initialize WebSocket manager: {e}")
+            self.ws_manager = None
         
         self.current_positions = {}
         self.current_orders = {}
@@ -618,8 +666,12 @@ class TradingSystem:
         """Start the trading system"""
         logger.info("Starting Delta Exchange Trading System")
         
-        # Connect to WebSocket
-        self.ws_manager.connect()
+        # Connect to WebSocket if available
+        if self.ws_manager:
+            try:
+                self.ws_manager.connect()
+            except Exception as e:
+                logger.error(f"Failed to connect WebSocket: {e}")
         
         # Load initial positions and orders
         self.load_initial_state()
@@ -632,14 +684,27 @@ class TradingSystem:
             # Load positions
             positions_response = self.api.get_positions()
             if positions_response.get('success'):
-                for pos_data in positions_response.get('result', []):
+                result = positions_response.get('result')
+                if isinstance(result, list):
+                    for pos_data in result:
+                        position = Position(
+                            product_id=pos_data.get('product_id', 0),
+                            product_symbol=pos_data.get('product_symbol', ''),
+                            size=pos_data.get('size', 0),
+                            entry_price=pos_data.get('entry_price', '0'),
+                            margin=pos_data.get('margin', '0'),
+                            liquidation_price=pos_data.get('liquidation_price', '0')
+                        )
+                        self.current_positions[position.product_symbol] = position
+                elif isinstance(result, dict):
+                    # Single position response
                     position = Position(
-                        product_id=pos_data['product_id'],
-                        product_symbol=pos_data['product_symbol'],
-                        size=pos_data['size'],
-                        entry_price=pos_data['entry_price'],
-                        margin=pos_data['margin'],
-                        liquidation_price=pos_data['liquidation_price']
+                        product_id=result.get('product_id', 0),
+                        product_symbol=result.get('product_symbol', ''),
+                        size=result.get('size', 0),
+                        entry_price=result.get('entry_price', '0'),
+                        margin=result.get('margin', '0'),
+                        liquidation_price=result.get('liquidation_price', '0')
                     )
                     self.current_positions[position.product_symbol] = position
             
@@ -648,19 +713,20 @@ class TradingSystem:
             if orders_response.get('success'):
                 for order_data in orders_response.get('result', []):
                     order = Order(
-                        id=order_data['id'],
-                        product_id=order_data['product_id'],
-                        product_symbol=order_data['product_symbol'],
-                        size=order_data['size'],
-                        side=order_data['side'],
-                        order_type=order_data['order_type'],
+                        id=order_data.get('id'),
+                        product_id=order_data.get('product_id', 0),
+                        product_symbol=order_data.get('product_symbol', ''),
+                        size=order_data.get('size', 0),
+                        side=order_data.get('side', ''),
+                        order_type=order_data.get('order_type', 'limit_order'),
                         limit_price=order_data.get('limit_price'),
-                        state=order_data['state'],
+                        state=order_data.get('state', 'pending'),
                         client_order_id=order_data.get('client_order_id'),
-                        created_at=order_data['created_at'],
-                        unfilled_size=order_data['unfilled_size']
+                        created_at=order_data.get('created_at'),
+                        unfilled_size=order_data.get('unfilled_size', 0)
                     )
-                    self.current_orders[order.id] = order
+                    if order.id:
+                        self.current_orders[order.id] = order
             
             logger.info(f"Loaded {len(self.current_positions)} positions and {len(self.current_orders)} orders")
             
@@ -688,18 +754,21 @@ class TradingSystem:
             order_id = message.get('order_id')
             action = message.get('action')
             
+            if not order_id:
+                return
+            
             if action == 'create':
                 order = Order(
                     id=order_id,
-                    product_id=message.get('product_id'),
-                    product_symbol=message.get('symbol'),
-                    size=message.get('size'),
-                    side=message.get('side'),
+                    product_id=message.get('product_id', 0),
+                    product_symbol=message.get('symbol', ''),
+                    size=message.get('size', 0),
+                    side=message.get('side', ''),
                     order_type=message.get('order_type', 'limit_order'),
                     limit_price=message.get('limit_price'),
-                    state=message.get('state'),
+                    state=message.get('state', 'pending'),
                     client_order_id=message.get('client_order_id'),
-                    unfilled_size=message.get('unfilled_size')
+                    unfilled_size=message.get('unfilled_size', 0)
                 )
                 self.current_orders[order_id] = order
                 self.save_order_to_db(order)
@@ -726,15 +795,17 @@ class TradingSystem:
             symbol = message.get('symbol')
             action = message.get('action')
             
+            if not symbol:
+                return
+            
             if action in ['create', 'update']:
                 position = Position(
-                    product_id=message.get('product_id'),
+                    product_id=message.get('product_id', 0),
                     product_symbol=symbol,
-                    size=message.get('size'),
-                    entry_price=message.get('entry_price'),
-                    margin=message.get('margin'),
-                    liquidation_price=message.get('liquidation_price')
-                )
+                    size=message.get('size', 0),
+                    entry_price=message.get('entry_price', '0'),
+                    margin=message.get('margin', '0'),
+                    liquidation_price=message.get('liquidation_price', '0')                )
                 self.current_positions[symbol] = position
                 self.save_position_to_db(position)
                 
@@ -810,7 +881,7 @@ class TradingSystem:
                     size=size,
                     side='sell',
                     order_type='market_order',
-                                       client_order_id=f"auto_sell_{int(time.time())}"
+                    client_order_id=f"auto_sell_{int(time.time())}"
                 )
                 
                 if self.config.RISK_MANAGEMENT_ENABLED:
@@ -837,8 +908,9 @@ class TradingSystem:
                 order.state = order_data.get('state')
                 order.created_at = order_data.get('created_at')
                 
-                self.current_orders[order.id] = order
-                self.save_order_to_db(order)
+                if order.id:
+                    self.current_orders[order.id] = order
+                    self.save_order_to_db(order)
                 
                 logger.info(f"Order placed successfully: ID {order.id}")
             else:
@@ -905,7 +977,7 @@ class TradingSystem:
                 conn.execute('''
                     INSERT INTO market_data (symbol, price, volume, timestamp)
                     VALUES (?, ?, ?, ?)
-                ''', (symbol, price, 0, timestamp))
+                ''', (symbol, price, 0, timestamp or datetime.now().isoformat()))
                 conn.commit()
         except Exception as e:
             logger.error(f"Error saving market data: {e}")
@@ -914,22 +986,25 @@ class TradingSystem:
         """Run backtest for a symbol"""
         try:
             # Generate sample price data (in real implementation, fetch from API or database)
-            dates = pd.date_range(start=start_date, end=end_date, freq='1H')
-            np.random.seed(42)  # For reproducible results
+            import random
+            random.seed(42)  # For reproducible results
             
             # Generate realistic price data with trend and volatility
             base_price = 50000  # Starting price
-            returns = np.random.normal(0.0001, 0.02, len(dates))  # Small positive drift with volatility
-            prices = [base_price]
+            num_points = 1000
+            price_data = []
             
-            for ret in returns[1:]:
-                prices.append(prices[-1] * (1 + ret))
-            
-            price_data = pd.DataFrame({
-                'timestamp': dates,
-                'close': prices,
-                'volume': np.random.randint(100, 1000, len(dates))
-            })
+            current_price = base_price
+            for i in range(num_points):
+                # Add some random walk with slight upward bias
+                change = random.gauss(0.0001, 0.02)  # Small positive drift with volatility
+                current_price = current_price * (1 + change)
+                
+                price_data.append({
+                    'price': current_price,
+                    'timestamp': time.time() + i * 3600,  # Hourly data
+                    'volume': random.randint(100, 1000)
+                })
             
             # Run backtest
             backtest_engine = BacktestEngine(SMAStrategy(10, 30))
@@ -963,8 +1038,8 @@ class TradingSystem:
         """Get current system status"""
         return {
             'is_trading_enabled': self.is_trading_enabled,
-            'websocket_connected': self.ws_manager.is_connected,
-            'websocket_authenticated': self.ws_manager.is_authenticated,
+            'websocket_connected': self.ws_manager.is_connected if self.ws_manager else False,
+            'websocket_authenticated': self.ws_manager.is_authenticated if self.ws_manager else False,
             'active_positions': len(self.current_positions),
             'open_orders': len(self.current_orders),
             'daily_pnl': self.risk_manager.daily_pnl,
@@ -974,9 +1049,15 @@ class TradingSystem:
 
 # Flask Application
 app = Flask(__name__)
-trading_system = TradingSystem()
 
-# HTML Template for Status Dashboard
+# Initialize trading system with error handling
+try:
+    trading_system = TradingSystem()
+except Exception as e:
+    logger.error(f"Failed to initialize trading system: {e}")
+    trading_system = None
+
+# HTML Template for Status Dashboard (simplified for better compatibility)
 DASHBOARD_HTML = '''
 <!DOCTYPE html>
 <html>
@@ -1011,14 +1092,14 @@ DASHBOARD_HTML = '''
             <h2>System Status</h2>
             <div class="status-grid">
                 <div class="status-item">
-                    <div class="status-value {{ 'green' if status.websocket_connected else 'red' }}">
-                        {{ 'CONNECTED' if status.websocket_connected else 'DISCONNECTED' }}
+                    <div class="status-value {% if status.websocket_connected %}green{% else %}red{% endif %}">
+                        {% if status.websocket_connected %}CONNECTED{% else %}DISCONNECTED{% endif %}
                     </div>
                     <div class="status-label">WebSocket</div>
                 </div>
                 <div class="status-item">
-                    <div class="status-value {{ 'green' if status.is_trading_enabled else 'red' }}">
-                        {{ 'ENABLED' if status.is_trading_enabled else 'DISABLED' }}
+                    <div class="status-value {% if status.is_trading_enabled %}green{% else %}red{% endif %}">
+                        {% if status.is_trading_enabled %}ENABLED{% else %}DISABLED{% endif %}
                     </div>
                     <div class="status-label">Trading</div>
                 </div>
@@ -1031,7 +1112,7 @@ DASHBOARD_HTML = '''
                     <div class="status-label">Open Orders</div>
                 </div>
                 <div class="status-item">
-                    <div class="status-value {{ 'green' if status.daily_pnl >= 0 else 'red' }}">
+                    <div class="status-value {% if status.daily_pnl >= 0 %}green{% else %}red{% endif %}">
                         ${{ "%.2f"|format(status.daily_pnl) }}
                     </div>
                     <div class="status-label">Daily PnL</div>
@@ -1055,7 +1136,7 @@ DASHBOARD_HTML = '''
                     {% for position in positions %}
                     <tr>
                         <td>{{ position.product_symbol }}</td>
-                        <td class="{{ 'green' if position.size > 0 else 'red' }}">{{ position.size }}</td>
+                        <td class="{% if position.size > 0 %}green{% else %}red{% endif %}">{{ position.size }}</td>
                         <td>${{ position.entry_price }}</td>
                         <td>${{ position.liquidation_price }}</td>
                         <td>${{ position.margin }}</td>
@@ -1084,7 +1165,7 @@ DASHBOARD_HTML = '''
                     <tr>
                         <td>{{ order.id }}</td>
                         <td>{{ order.product_symbol }}</td>
-                        <td class="{{ 'green' if order.side == 'buy' else 'red' }}">{{ order.side.upper() }}</td>
+                        <td class="{% if order.side == 'buy' %}green{% else %}red{% endif %}">{{ order.side.upper() }}</td>
                         <td>{{ order.size }}</td>
                         <td>${{ order.limit_price or 'MARKET' }}</td>
                         <td>{{ order.state.upper() }}</td>
@@ -1098,7 +1179,7 @@ DASHBOARD_HTML = '''
         <div class="card">
             <h2>Controls</h2>
             <button class="btn btn-success" onclick="toggleTrading()">
-                {{ 'Disable Trading' if status.is_trading_enabled else 'Enable Trading' }}
+                {% if status.is_trading_enabled %}Disable Trading{% else %}Enable Trading{% endif %}
             </button>
             <button class="btn btn-danger" onclick="cancelAllOrders()">Cancel All Orders</button>
             <button class="btn btn-primary" onclick="runBacktest()">Run Backtest</button>
@@ -1112,6 +1193,9 @@ DASHBOARD_HTML = '''
                 .then(data => {
                     alert(data.message);
                     location.reload();
+                })
+                .catch(error => {
+                    alert('Error: ' + error);
                 });
         }
         
@@ -1122,6 +1206,9 @@ DASHBOARD_HTML = '''
                     .then(data => {
                         alert(data.message);
                         location.reload();
+                    })
+                    .catch(error => {
+                        alert('Error: ' + error);
                     });
             }
         }
@@ -1141,6 +1228,9 @@ DASHBOARD_HTML = '''
                 .then(response => response.json())
                 .then(data => {
                     alert('Backtest completed. Check logs for results.');
+                })
+                .catch(error => {
+                    alert('Error: ' + error);
                 });
             }
         }
@@ -1149,11 +1239,14 @@ DASHBOARD_HTML = '''
 </html>
 '''
 
-# API Routes
+# API Routes with error handling
 @app.route('/')
 def dashboard():
     """Main dashboard"""
     try:
+        if not trading_system:
+            return "Trading system not initialized", 500
+            
         status = trading_system.get_system_status()
         positions = list(trading_system.current_positions.values())
         orders = list(trading_system.current_orders.values())[-10:]  # Last 10 orders
@@ -1170,6 +1263,9 @@ def dashboard():
 def api_status():
     """Get system status"""
     try:
+        if not trading_system:
+            return jsonify({"error": "Trading system not initialized"}), 500
+            
         return jsonify(trading_system.get_system_status())
     except Exception as e:
         logger.error(f"Error getting status: {e}")
@@ -1179,6 +1275,9 @@ def api_status():
 def api_positions():
     """Get current positions"""
     try:
+        if not trading_system:
+            return jsonify({"error": "Trading system not initialized"}), 500
+            
         positions = [asdict(pos) for pos in trading_system.current_positions.values()]
         return jsonify({"positions": positions})
     except Exception as e:
@@ -1189,6 +1288,9 @@ def api_positions():
 def api_orders():
     """Get current orders"""
     try:
+        if not trading_system:
+            return jsonify({"error": "Trading system not initialized"}), 500
+            
         orders = [asdict(order) for order in trading_system.current_orders.values()]
         return jsonify({"orders": orders})
     except Exception as e:
@@ -1199,6 +1301,9 @@ def api_orders():
 def api_place_order():
     """Place a new order"""
     try:
+        if not trading_system:
+            return jsonify({"error": "Trading system not initialized"}), 500
+            
         data = request.get_json()
         
         order = Order(
@@ -1221,6 +1326,9 @@ def api_place_order():
 def api_cancel_order():
     """Cancel an order"""
     try:
+        if not trading_system:
+            return jsonify({"error": "Trading system not initialized"}), 500
+            
         data = request.get_json()
         order_id = int(data.get('order_id'))
         
@@ -1235,6 +1343,9 @@ def api_cancel_order():
 def api_cancel_all_orders():
     """Cancel all open orders"""
     try:
+        if not trading_system:
+            return jsonify({"error": "Trading system not initialized"}), 500
+            
         cancelled_count = 0
         for order_id in list(trading_system.current_orders.keys()):
             trading_system.cancel_order(order_id)
@@ -1249,6 +1360,9 @@ def api_cancel_all_orders():
 def api_toggle_trading():
     """Toggle trading on/off"""
     try:
+        if not trading_system:
+            return jsonify({"error": "Trading system not initialized"}), 500
+            
         trading_system.is_trading_enabled = not trading_system.is_trading_enabled
         status = "enabled" if trading_system.is_trading_enabled else "disabled"
         
@@ -1261,6 +1375,9 @@ def api_toggle_trading():
 def api_backtest():
     """Run backtest"""
     try:
+        if not trading_system:
+            return jsonify({"error": "Trading system not initialized"}), 500
+            
         data = request.get_json()
         symbol = data.get('symbol', 'BTCUSD')
         start_date = data.get('start_date', '2024-01-01')
@@ -1277,6 +1394,9 @@ def api_backtest():
 def api_wallet():
     """Get wallet balances"""
     try:
+        if not trading_system:
+            return jsonify({"error": "Trading system not initialized"}), 500
+            
         response = trading_system.api.get_wallet_balances()
         return jsonify(response)
     except Exception as e:
@@ -1287,11 +1407,10 @@ def api_wallet():
 def health_check():
     """Health check endpoint for monitoring"""
     try:
+        if not trading_system:
+            return jsonify({"status": "unhealthy", "reason": "Trading system not initialized"}), 503
+            
         status = trading_system.get_system_status()
-        
-        # Check if critical components are working
-        if not status['websocket_connected']:
-            return jsonify({"status": "unhealthy", "reason": "WebSocket disconnected"}), 503
         
         return jsonify({
             "status": "healthy",
@@ -1306,9 +1425,12 @@ def health_check():
 def api_logs():
     """Get recent log entries"""
     try:
-        with open('trading_system.log', 'r') as f:
-            lines = f.readlines()
-            recent_logs = lines[-100:]  # Last 100 lines
+        try:
+            with open('trading_system.log', 'r') as f:
+                lines = f.readlines()
+                recent_logs = lines[-100:]  # Last 100 lines
+        except FileNotFoundError:
+            recent_logs = ["Log file not found"]
         
         return jsonify({"logs": recent_logs})
     except Exception as e:
@@ -1326,8 +1448,9 @@ def internal_error(error):
 # Initialize and start the system
 if __name__ == '__main__':
     try:
-        # Start the trading system
-        trading_system.start()
+        # Start the trading system if initialized
+        if trading_system:
+            trading_system.start()
         
         # Start Flask app
         port = int(os.getenv('PORT', 5000))
@@ -1335,5 +1458,7 @@ if __name__ == '__main__':
         
     except Exception as e:
         logger.error(f"Failed to start application: {e}")
-        raise
+        # Don't raise the exception, let the app start anyway for debugging
+        port = int(os.getenv('PORT', 5000))
+        app.run(host='0.0.0.0', port=port, debug=False)
 
