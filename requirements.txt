@@ -2,7 +2,7 @@ Flask==2.3.3
 flask-cors==3.0.10
 python-dotenv==1.0.0
 flask-sock==0.6.0
-simple-websocket==0.3.1
+simple-websocket==0.10.1    # Updated version, compatible with Flask-Sock
 requests==2.32.0
 gunicorn==21.2.0
 numpy==1.26.4
