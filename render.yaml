@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: delta-trading-system
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn --bind 0.0.0.0:$PORT --workers 1 --timeout 120 app:app
+    envVars:
+      - key: DELTA_API_KEY
+        sync: false
+      - key: DELTA_API_SECRET
+        sync: false
+      - key: MAX_POSITION_SIZE
+        value: "10"
+      - key: MAX_DAILY_LOSS
+        value: "1000.0"
+      - key: RISK_MANAGEMENT_ENABLED
+        value: "true"
