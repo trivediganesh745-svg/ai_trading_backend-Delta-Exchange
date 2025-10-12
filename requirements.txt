@@ -1,12 +1,7 @@
-# requirements.txt - Fixed for Render deployment
 Flask==2.3.3
 requests==2.31.0
 websocket-client==1.6.4
+pandas==2.1.3
+numpy==1.25.2
 python-dotenv==1.0.0
 gunicorn==21.2.0
-Werkzeug==2.3.7
-
-# Alternative lightweight data processing (if pandas still fails)
-# You can uncomment these and remove pandas/numpy if needed
-# tablib==3.5.0
-# python-dateutil==2.8.2
