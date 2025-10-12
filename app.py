@@ -1503,4 +1503,4 @@ if __name__ == '__main__':
     initialize_system()
     # Run Flask app (for local development, a production WSGI server would call the 'app' object)
     # Using '0.0.0.0' makes it accessible externally, e.g., in a Docker container or cloud dev env
-    app.run(host='0.0.0.0', port=os.getenv('PORT', 5000), debug=False)
+    app.run(host='0.0.0.0', port=os.getenv('PORT', 10000), debug=False)
