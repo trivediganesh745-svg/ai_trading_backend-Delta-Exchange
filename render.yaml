@@ -1,21 +1,24 @@
+```yaml
 services:
   - type: web
     name: delta-trading-bot
     env: python
-    # This build command is for Render's Python buildpack
+    # buildCommand will automatically run `pip install -r requirements.txt`
+    # if `env: python` is specified and no custom build command is set.
+    # However, it's good practice to be explicit:
     buildCommand: pip install -r requirements.txt
-    # This is your specified start command
+    # Your chosen start command:
     startCommand: gunicorn --bind 0.0.0.0:$PORT --workers 1 --timeout 120 --preload app:app
     healthCheckPath: /health
     disk: # Define a persistent disk for your SQLite database
       name: trading-bot-data
       mountPath: /var/data
-      sizeGB: 1 # You can adjust the size as needed, 1GB is usually plenty for SQLite
+      sizeGB: 1 # Adjust as needed
     envVars:
       - key: DELTA_API_KEY
-        sync: false # Set this value in Render dashboard for security
+        sync: false # Set this value securely in the Render dashboard
       - key: DELTA_API_SECRET
-        sync: false # Set this value in Render dashboard for security
+        sync: false # Set this value securely in the Render dashboard
       - key: MAX_POSITION_SIZE
         value: "10"
       - key: MAX_DAILY_LOSS
@@ -23,6 +26,7 @@ services:
       - key: RISK_MANAGEMENT_ENABLED
         value: "true"
       - key: DATABASE_PATH
-        value: "/var/data/trading_system.db" # Mount path of your persistent disk
+        value: "/var/data/trading_system.db" # This maps to your persistent disk
     # plan: free # or starter, pro, etc.
-    # numInstances: 1 # Number of instances
+    # numInstances: 1
+```
