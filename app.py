@@ -42,6 +42,16 @@ def api_error(message, status_code=400):
 def index():
     return jsonify({"status": "Delta Exchange API service is running"}), 200
 
+# <<< FIX: ADD THIS HEALTH CHECK ENDPOINT >>>
+@app.route('/api/health')
+def health_check():
+    """
+    Health check endpoint for the hosting platform (e.g., Render).
+    Returns a 200 OK status to indicate the service is running.
+    """
+    return jsonify({"status": "healthy"}), 200
+# <<< END OF FIX >>>
+
 @app.route('/product/<int:product_id>', methods=['GET'])
 def get_product(product_id):
     """Get details for a specific product."""
