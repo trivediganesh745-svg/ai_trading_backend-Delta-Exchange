@@ -1,32 +1,45 @@
-```yaml
+# render.yaml
+# For deploying the Delta Exchange Trading System using Render Blueprints
+
 services:
   - type: web
-    name: delta-trading-bot
+    name: delta-trading-api
     env: python
-    # buildCommand will automatically run `pip install -r requirements.txt`
-    # if `env: python` is specified and no custom build command is set.
-    # However, it's good practice to be explicit:
     buildCommand: pip install -r requirements.txt
-    # Your chosen start command:
-    startCommand: gunicorn --bind 0.0.0.0:$PORT --workers 1 --timeout 120 --preload app:app
-    healthCheckPath: /health
-    disk: # Define a persistent disk for your SQLite database
-      name: trading-bot-data
-      mountPath: /var/data
-      sizeGB: 1 # Adjust as needed
+    startCommand: gunicorn -w 1 -b 0.0.0.0:$PORT app:app --preload
     envVars:
       - key: DELTA_API_KEY
-        sync: false # Set this value securely in the Render dashboard
+        sync: false # Set this value in Render dashboard for security
       - key: DELTA_API_SECRET
-        sync: false # Set this value securely in the Render dashboard
-      - key: MAX_POSITION_SIZE
-        value: "10"
-      - key: MAX_DAILY_LOSS
-        value: "1000.0"
-      - key: RISK_MANAGEMENT_ENABLED
-        value: "true"
-      - key: DATABASE_PATH
-        value: "/var/data/trading_system.db" # This maps to your persistent disk
-    # plan: free # or starter, pro, etc.
-    # numInstances: 1
-```
+        sync: false # Set this value in Render dashboard for security
+      - key: AI_STUDIO_SECRET
+        sync: false # Set this value in Render dashboard for security
+      - key: ENVIRONMENT
+        value: testnet # Or 'production'
+    disk:
+      name: trading-data
+      mountPath: /var/lib/sqlite # Mount point for the SQLite database
+      sizeGB: 1 # Size of the persistent disk
+
+  - type: worker
+    name: delta-trading-worker
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -c "from app import initialize_system; initialize_system(); import time; while True: time.sleep(3600)"
+    envVars:
+      - key: DELTA_API_KEY
+        sync: false
+      - key: DELTA_API_SECRET
+        sync: false
+      - key: AI_STUDIO_SECRET
+        sync: false
+      - key: ENVIRONMENT
+        value: testnet # Or 'production'
+    disk:
+      name: trading-data # Reference the same disk
+      mountPath: /var/lib/sqlite # Mount point for the SQLite database
+      sizeGB: 1
+
+# If you need to expose internal SQLite as a managed service,
+# you'd use a separate database service, but for embedded SQLite,
+# a persistent disk mounted to both web and worker is the way.
