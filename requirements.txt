@@ -1,4 +1,4 @@
-# requirements.txt (New)
+# requirements.txt (Updated)
 setuptools>=68.0.0
 Flask==2.3.2
 requests==2.31.0
@@ -7,3 +7,4 @@ pandas==2.0.3
 numpy==1.25.1
 gunicorn==21.2.0
 gevent==23.7.0
+pyotp==2.9.0
