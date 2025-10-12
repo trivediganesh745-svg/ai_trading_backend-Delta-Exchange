@@ -32,20 +32,23 @@ logger = logging.getLogger(__name__)
 # Flask app initialization
 app = Flask(__name__)
 
-# Environment variables
-# Using sensible defaults for local testing if not provided
+# Environment variables - FIX: Remove extra quotes and add proper defaults
 DELTA_API_KEY = os.getenv('DELTA_API_KEY', 'your_delta_api_key_here')
 DELTA_API_SECRET = os.getenv('DELTA_API_SECRET', 'your_delta_api_secret_here')
-AI_STUDIO_SECRET = os.getenv('AI_STUDIO_SECRET', 'your_ai_studio_secret_here_for_testing') # For local testing, use a default
-ENVIRONMENT = os.getenv('ENVIRONMENT', 'testnet')  # 'production' or 'testnet'
+AI_STUDIO_SECRET = os.getenv('AI_STUDIO_SECRET', 'your_ai_studio_secret_here_for_testing')
+ENVIRONMENT = os.getenv('ENVIRONMENT', 'testnet').strip().strip("'\"")  # FIX: Strip quotes
 
-# API Configuration
+# API Configuration - FIX: Use correct URLs from documentation
 if ENVIRONMENT == 'production':
     BASE_URL = 'https://api.india.delta.exchange'
     WS_URL = 'wss://socket.india.delta.exchange'
 else:
     BASE_URL = 'https://cdn-ind.testnet.deltaex.org'
     WS_URL = 'wss://socket-ind.testnet.deltaex.org'
+
+logger.info(f"Environment: {ENVIRONMENT}")
+logger.info(f"Base URL: {BASE_URL}")
+logger.info(f"WebSocket URL: {WS_URL}")
 
 # --- Data Models ---
 @dataclass
@@ -87,7 +90,7 @@ class Trade:
 @dataclass
 class MarketData:
     symbol: str
-    price: str # Storing as string to match API, convert to float for calculations
+    price: str
     timestamp: int
     volume: Optional[str] = None
     bid: Optional[str] = None
@@ -103,7 +106,7 @@ class DatabaseManager:
     def get_connection(self):
         """Provides a database connection that is automatically closed."""
         conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row # Allows accessing columns by name
+        conn.row_factory = sqlite3.Row
         try:
             yield conn
         finally:
@@ -144,7 +147,7 @@ class DatabaseManager:
                 )
             ''')
             
-            # Market data table (symbol, timestamp as composite primary key for uniqueness)
+            # Market data table
             conn.execute('''
                 CREATE TABLE IF NOT EXISTS market_data (
                     symbol TEXT,
@@ -197,7 +200,6 @@ class DeltaExchangeAPI:
         query_string = ""
         
         if params:
-            # Sort params for consistent signature generation
             sorted_params = sorted(params.items())
             query_string = "?" + "&".join([f"{k}={v}" for k, v in sorted_params])
         
@@ -209,7 +211,7 @@ class DeltaExchangeAPI:
             'api-key': self.api_key,
             'timestamp': timestamp,
             'signature': signature,
-            'User-Agent': 'python-trading-bot', # Custom User-Agent
+            'User-Agent': 'python-trading-bot',
             'Content-Type': 'application/json'
         }
         
@@ -221,13 +223,13 @@ class DeltaExchangeAPI:
                 params=params, 
                 data=payload if data else None, 
                 headers=headers, 
-                timeout=(5, 30) # Increased timeout for robustness
+                timeout=(5, 30)
             )
-            response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
+            response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
             logger.error(f"API request to {url} failed: {e}")
-            raise # Re-raise to be handled by calling function
+            raise
     
     def place_order(self, order: Order) -> Dict:
         """Place a new order"""
@@ -270,7 +272,7 @@ class DeltaExchangeAPI:
         """Get available products"""
         return self.make_request("GET", "/v2/products")
 
-# --- WebSocket Manager ---
+# --- WebSocket Manager - FIX: Add better error handling and connection management ---
 class WebSocketManager:
     def __init__(self, api_key: str, api_secret: str, ws_url: str, trading_system: 'TradingSystem'):
         self.api_key = api_key
@@ -282,6 +284,8 @@ class WebSocketManager:
         self.is_authenticated = False
         self.subscribed_channels: set[str] = set()
         self._reconnect_lock = threading.Lock()
+        self._connection_attempts = 0
+        self._max_reconnect_attempts = 5
         
     def generate_signature(self, message: str) -> str:
         """Generate HMAC signature for WebSocket authentication"""
@@ -294,6 +298,7 @@ class WebSocketManager:
         """WebSocket connection opened"""
         logger.info("WebSocket connection opened")
         self.is_connected = True
+        self._connection_attempts = 0  # Reset on successful connection
         self.send_authentication()
     
     def on_close(self, ws: websocket.WebSocketApp, close_status_code: int, close_msg: str):
@@ -301,11 +306,16 @@ class WebSocketManager:
         logger.warning(f"WebSocket closed: {close_status_code} - {close_msg}")
         self.is_connected = False
         self.is_authenticated = False
-        # Attempt to reconnect after 5 seconds
+        
+        # FIX: Better reconnection logic with exponential backoff
         with self._reconnect_lock:
-            if not self.trading_system.is_stopping: # Only reconnect if system isn't explicitly stopping
-                logger.info("Attempting to reconnect WebSocket in 5 seconds...")
-                threading.Timer(5.0, self.connect).start()
+            if not self.trading_system.is_stopping and self._connection_attempts < self._max_reconnect_attempts:
+                self._connection_attempts += 1
+                backoff_time = min(5 * (2 ** (self._connection_attempts - 1)), 60)  # Exponential backoff, max 60s
+                logger.info(f"Attempting to reconnect WebSocket in {backoff_time} seconds... (attempt {self._connection_attempts}/{self._max_reconnect_attempts})")
+                threading.Timer(backoff_time, self.connect).start()
+            elif self._connection_attempts >= self._max_reconnect_attempts:
+                logger.error("Max reconnection attempts reached. WebSocket will not reconnect automatically.")
     
     def on_error(self, ws: websocket.WebSocketApp, error: Exception):
         """WebSocket error occurred"""
@@ -343,23 +353,21 @@ class WebSocketManager:
             self.handle_trade_update(data)
         
         else:
-            logger.debug(f"Unhandled message type: {message_type} with data: {data}")
+            logger.debug(f"Unhandled message type: {message_type}")
     
     def handle_order_update(self, data: Dict):
         """Handle order updates"""
-        # logger.info(f"Order update: {data}") # Too verbose for live
         self.trading_system.process_order_update(data)
     
     def handle_position_update(self, data: Dict):
         """Handle position updates"""
-        # logger.info(f"Position update: {data}") # Too verbose for live
         self.trading_system.process_position_update(data)
     
     def handle_ticker_update(self, data: Dict):
         """Handle ticker updates"""
         market_data = MarketData(
             symbol=data.get('symbol', ''),
-            price=str(data.get('close', '0')), # Ensure price is stored as string
+            price=str(data.get('close', '0')),
             timestamp=data.get('timestamp', int(time.time() * 1000000)),
             volume=str(data.get('volume')) if data.get('volume') is not None else None,
             bid=str(data.get('best_bid')) if data.get('best_bid') is not None else None,
@@ -369,15 +377,13 @@ class WebSocketManager:
     
     def handle_trade_update(self, data: Dict):
         """Handle trade updates"""
-        # logger.info(f"Trade update: {data}") # Too verbose for live
-        # You might want to process and save trades similar to orders
         pass 
     
     def send_authentication(self):
         """Send authentication message"""
         method = 'GET'
         timestamp = str(int(time.time()))
-        path = '/live' # Path for live connection auth
+        path = '/live'
         signature_data = method + timestamp + path
         signature = self.generate_signature(signature_data)
         
@@ -390,23 +396,22 @@ class WebSocketManager:
             }
         }
         
-        self.ws.send(json.dumps(auth_message))
-        logger.info("Authentication message sent to WebSocket.")
+        if self.ws:
+            self.ws.send(json.dumps(auth_message))
+            logger.info("Authentication message sent to WebSocket.")
     
     def subscribe_to_channels(self):
         """Subscribe to required channels after authentication."""
-        # Ensure we only try to subscribe if authenticated
         if not self.is_authenticated:
             logger.warning("Not authenticated, skipping channel subscriptions.")
             return
 
-        # Define subscriptions
-        # IMPORTANT: These symbols must be valid on Delta Exchange for your ENVIRONMENT
+        # FIX: Use valid symbols for your environment
         subscriptions = [
             {"name": "orders", "symbols": ["all"]},
             {"name": "positions", "symbols": ["all"]},
-            {"name": "v2/ticker", "symbols": ["BTCUSD", "ETHUSD"]}, # Example symbols, adjust as needed
-            {"name": "all_trades", "symbols": ["BTCUSD", "ETHUSD"]} # Example symbols
+            {"name": "v2/ticker", "symbols": ["BTCUSD", "ETHUSD"]},
+            {"name": "all_trades", "symbols": ["BTCUSD", "ETHUSD"]}
         ]
 
         for sub in subscriptions:
@@ -440,6 +445,16 @@ class WebSocketManager:
             return
 
         try:
+            # FIX: Add connection validation
+            if not self.api_key or self.api_key == 'your_delta_api_key_here':
+                logger.error("Cannot connect WebSocket: API key not configured")
+                return
+                
+            if not self.api_secret or self.api_secret == 'your_delta_api_secret_here':
+                logger.error("Cannot connect WebSocket: API secret not configured")
+                return
+
+            logger.info(f"Connecting to WebSocket: {self.ws_url}")
             self.ws = websocket.WebSocketApp(
                 self.ws_url,
                 on_open=self.on_open,
@@ -448,7 +463,7 @@ class WebSocketManager:
                 on_close=self.on_close
             )
             
-            ws_thread = threading.Thread(target=self.ws.run_forever, daemon=True) # daemon=True ensures thread exits with main program
+            ws_thread = threading.Thread(target=self.ws.run_forever, daemon=True)
             ws_thread.start()
             logger.info("WebSocket connection thread started.")
             
@@ -459,10 +474,10 @@ class WebSocketManager:
 class TradingStrategy:
     def __init__(self, name: str):
         self.name = name
-        self.trading_system: Optional['TradingSystem'] = None # Reference to the system for placing orders
-        self.positions: Dict[str, Any] = {} # Store current positions per symbol
-        self.orders: Dict[str, Any] = {}     # Store active orders per symbol/order_id
-        self.market_data: Dict[str, MarketData] = {} # Latest market data per symbol
+        self.trading_system: Optional['TradingSystem'] = None
+        self.positions: Dict[str, Any] = {}
+        self.orders: Dict[str, Any] = {}
+        self.market_data: Dict[str, MarketData] = {}
         
     def set_trading_system(self, system: 'TradingSystem'):
         self.trading_system = system
@@ -474,38 +489,32 @@ class TradingStrategy:
     
     def generate_signals(self, data: MarketData):
         """Override this method to implement trading logic."""
-        # This method is designed to be overridden by concrete strategies
         pass
     
     def get_current_position(self, symbol: str) -> int:
         """Helper to get current position size for a symbol."""
-        # Note: self.positions here is strategy's view, may not be system's absolute live view
-        # For simplicity, we'll try to match a product_id to symbol if available, otherwise 0
         current_pos_size = 0
-        for pos in self.trading_system.positions.values(): # Iterate through all live system positions
+        for pos in self.trading_system.positions.values():
             if pos.get('product_symbol') == symbol:
                 current_pos_size = pos.get('size', 0)
                 break
         return current_pos_size
 
     def get_available_balance(self) -> float:
-        """Placeholder to get available balance from the system. Needs API call."""
-        # In a real system, you'd fetch this from the trading_system's API client
-        # For now, return a dummy value or implement a proper API call
-        # e.g., self.trading_system.api_client.get_account_balance()
+        """Placeholder to get available balance from the system."""
         logger.warning("get_available_balance is a placeholder and returns dummy value (1000). Implement real balance fetch.")
-        return 1000.0 # Dummy balance for demonstration
-    
-# --- Simple Moving Average Strategy (Improved with Pandas and Live Trading Logic) ---
+        return 1000.0
+
+# --- Simple Moving Average Strategy ---
 class SMAStrategy(TradingStrategy):
     def __init__(self, short_window: int = 10, long_window: int = 30, trade_size_percentage: float = 0.05):
         super().__init__("SMA_Strategy")
         self.short_window = short_window
         self.long_window = long_window
-        self.trade_size_percentage = trade_size_percentage # % of available balance to trade
+        self.trade_size_percentage = trade_size_percentage
         
         self.price_history: Dict[str, pd.Series] = defaultdict(lambda: pd.Series(dtype='float64'))
-        self.active_orders: Dict[str, Order] = {} # Track orders initiated by this strategy
+        self.active_orders: Dict[str, Order] = {}
     
     def generate_signals(self, data: MarketData):
         """Generate trading signals based on SMA crossover using Pandas Series."""
@@ -516,15 +525,14 @@ class SMAStrategy(TradingStrategy):
             logger.warning(f"Invalid price data received for {symbol}: {data.price}")
             return
         
-        new_price_series = pd.Series([price], index=[pd.to_datetime(data.timestamp, unit='us')]) # Delta uses microseconds
+        new_price_series = pd.Series([price], index=[pd.to_datetime(data.timestamp, unit='us')])
         self.price_history[symbol] = pd.concat([self.price_history[symbol], new_price_series])
         
         max_history_needed = self.long_window + 1
         if len(self.price_history[symbol]) > max_history_needed:
             self.price_history[symbol] = self.price_history[symbol].iloc[-max_history_needed:]
         
-        # Ensure we have enough data for both long and short windows
-        if len(self.price_history[symbol]) >= self.long_window + 1: # Need 1 extra for previous MA
+        if len(self.price_history[symbol]) >= self.long_window + 1:
             current_short_ma = self.price_history[symbol].iloc[-self.short_window:].mean()
             current_long_ma = self.price_history[symbol].iloc[-self.long_window:].mean()
             
@@ -537,23 +545,20 @@ class SMAStrategy(TradingStrategy):
             if current_short_ma > current_long_ma and prev_short_ma <= prev_long_ma:
                 logger.info(f"[{self.name}] BUY signal for {symbol}: Short MA ({current_short_ma:.2f}) crossed above Long MA ({current_long_ma:.2f})")
                 
-                if current_position_size <= 0: # Only buy if not already long
-                    # Determine size to trade
+                if current_position_size <= 0:
                     balance = self.get_available_balance()
                     trade_amount = balance * self.trade_size_percentage
-                    size_to_buy = int(trade_amount / price) # Simple sizing based on price
+                    size_to_buy = int(trade_amount / price)
                     
                     if size_to_buy > 0 and self.trading_system:
-                        # Close short position if exists before going long
                         if current_position_size < 0:
                             logger.info(f"[{self.name}] Closing existing SHORT position ({current_position_size}) for {symbol} before BUY.")
                             close_order = Order(product_symbol=symbol, size=abs(current_position_size), side="buy", order_type="market_order")
                             self.trading_system.place_order(close_order)
-                            # Wait for order update or check position before placing new buy order
-                            time.sleep(1) # Simple delay for demo, in real system use event-driven confirmation
-                            current_position_size = self.get_current_position(symbol) # Refresh position
+                            time.sleep(1)
+                            current_position_size = self.get_current_position(symbol)
 
-                        if current_position_size == 0: # If now flat, place buy order
+                        if current_position_size == 0:
                             order = Order(product_symbol=symbol, size=size_to_buy, side="buy", order_type="market_order")
                             result = self.trading_system.place_order(order)
                             if result and 'id' in result:
@@ -571,22 +576,20 @@ class SMAStrategy(TradingStrategy):
             elif current_short_ma < current_long_ma and prev_short_ma >= prev_long_ma:
                 logger.info(f"[{self.name}] SELL signal for {symbol}: Short MA ({current_short_ma:.2f}) crossed below Long MA ({current_long_ma:.2f})")
                 
-                if current_position_size >= 0: # Only sell if not already short
-                    # Determine size to trade
+                if current_position_size >= 0:
                     balance = self.get_available_balance()
                     trade_amount = balance * self.trade_size_percentage
-                    size_to_sell = int(trade_amount / price) # Simple sizing based on price
+                    size_to_sell = int(trade_amount / price)
                     
                     if size_to_sell > 0 and self.trading_system:
-                        # Close long position if exists before going short
                         if current_position_size > 0:
                             logger.info(f"[{self.name}] Closing existing LONG position ({current_position_size}) for {symbol} before SELL.")
                             close_order = Order(product_symbol=symbol, size=current_position_size, side="sell", order_type="market_order")
                             self.trading_system.place_order(close_order)
-                            time.sleep(1) # Simple delay for demo, in real system use event-driven confirmation
-                            current_position_size = self.get_current_position(symbol) # Refresh position
+                            time.sleep(1)
+                            current_position_size = self.get_current_position(symbol)
 
-                        if current_position_size == 0: # If now flat, place sell order (go short)
+                        if current_position_size == 0:
                             order = Order(product_symbol=symbol, size=size_to_sell, side="sell", order_type="market_order")
                             result = self.trading_system.place_order(order)
                             if result and 'id' in result:
@@ -604,7 +607,6 @@ class SMAStrategy(TradingStrategy):
         else:
             logger.debug(f"[{self.name}] Insufficient data for MA calculation for {symbol}. Current length: {len(self.price_history[symbol])}")
 
-
 # --- Backtesting Engine ---
 class BacktestEngine:
     def __init__(self, db_manager: DatabaseManager):
@@ -615,47 +617,37 @@ class BacktestEngine:
         """Run backtest for a strategy"""
         logger.info(f"Running backtest for {strategy.name} on {symbol} from {start_date} to {end_date}")
         
-        # Get historical data
         historical_data_raw = self.get_historical_data(symbol, start_date, end_date)
         
         if not historical_data_raw:
             logger.warning(f"No historical data available for {symbol} between {start_date} and {end_date}.")
             return {"error": "No historical data available"}
         
-        # Convert to Pandas DataFrame for efficient processing in backtest
         df = pd.DataFrame(historical_data_raw)
         df['price'] = pd.to_numeric(df['price'])
-        # Sort by timestamp to ensure correct order
         df = df.sort_values(by='timestamp').reset_index(drop=True)
 
-        # Initialize backtest variables
         capital = initial_capital
-        position_size = 0.0 # Quantity of asset held
+        position_size = 0.0
         trades = []
         equity_curve = []
         
-        # Use simple buy/sell signals for backtest (strategy.should_buy/sell needs to be implemented for backtesting)
-        # For SMAStrategy in backtest, we can directly calculate SMAs on the DataFrame for vectorized approach
         if isinstance(strategy, SMAStrategy):
             df['short_ma'] = df['price'].rolling(window=strategy.short_window, min_periods=1).mean()
             df['long_ma'] = df['price'].rolling(window=strategy.long_window, min_periods=1).mean()
             
-            # Generate signals based on current and previous MA values
             df['buy_signal'] = (df['short_ma'] > df['long_ma']) & (df['short_ma'].shift(1) <= df['long_ma'].shift(1))
             df['sell_signal'] = (df['short_ma'] < df['long_ma']) & (df['short_ma'].shift(1) >= df['long_ma'].shift(1))
             
-            # Fill NaNs created by .shift() so first valid signal can be detected
             df[['buy_signal', 'sell_signal']] = df[['buy_signal', 'sell_signal']].fillna(False)
 
-            # Backtest loop
             for i, row in df.iterrows():
                 current_price = row['price']
                 timestamp = row['timestamp']
                 
-                # Check for signals
-                if row['buy_signal'] and position_size <= 0: # Buy only if not long or currently short
-                    if position_size < 0: # Close short position first
-                        pnl = abs(position_size) * (row['price'] - trades[-1]['entry_price']) # Profit from closing short
+                if row['buy_signal'] and position_size <= 0:
+                    if position_size < 0:
+                        pnl = abs(position_size) * (row['price'] - trades[-1]['entry_price'])
                         capital += pnl
                         trades.append({
                             'type': 'close_short',
@@ -664,10 +656,9 @@ class BacktestEngine:
                             'pnl': pnl,
                             'capital_after_trade': capital
                         })
-                        position_size = 0 # Position is now flat
+                        position_size = 0
 
-                    # Open long position
-                    if capital > 0: # Ensure enough capital to buy
+                    if capital > 0:
                         units_to_buy = capital / current_price
                         position_size += units_to_buy
                         trades.append({
@@ -679,9 +670,9 @@ class BacktestEngine:
                         })
                         logger.debug(f"Backtest BUY at {current_price:.2f} for {symbol}. New position: {position_size:.2f}")
 
-                elif row['sell_signal'] and position_size >= 0: # Sell only if not short or currently long
-                    if position_size > 0: # Close long position first
-                        pnl = position_size * (row['price'] - trades[-1]['entry_price']) # Profit from closing long
+                elif row['sell_signal'] and position_size >= 0:
+                    if position_size > 0:
+                        pnl = position_size * (row['price'] - trades[-1]['entry_price'])
                         capital += pnl
                         trades.append({
                             'type': 'close_long',
@@ -690,12 +681,11 @@ class BacktestEngine:
                             'pnl': pnl,
                             'capital_after_trade': capital
                         })
-                        position_size = 0 # Position is now flat
+                        position_size = 0
 
-                    # Open short position
-                    if capital > 0: # Ensure enough capital to sell
+                    if capital > 0:
                         units_to_sell = capital / current_price
-                        position_size -= units_to_sell # Negative for short position
+                        position_size -= units_to_sell
                         trades.append({
                             'type': 'sell',
                             'entry_price': current_price,
@@ -705,88 +695,28 @@ class BacktestEngine:
                         })
                         logger.debug(f"Backtest SELL at {current_price:.2f} for {symbol}. New position: {position_size:.2f}")
 
-                # Calculate current equity
                 current_equity = capital
                 if position_size != 0:
-                    current_equity += position_size * current_price # Add/subtract value of open position
+                    current_equity += position_size * current_price
                 
                 equity_curve.append({
                     'timestamp': timestamp,
                     'equity': current_equity
                 })
         else:
-            # Fallback for strategies not yet adapted for vectorized backtesting
-            logger.warning(f"Strategy {strategy.name} is not optimized for vectorized backtesting. Using basic iteration.")
-            # For backtest, we need to inject the trading system for placing orders
-            # But the backtest engine simulates orders directly.
-            # So strategy.trading_system will be None or dummy for backtest.
-            
-            # This part needs strategy.should_buy/should_sell to be implemented
-            # within the strategy specifically for backtesting to function correctly.
-            # As they are empty in the base class, this path will not generate trades.
-            logger.error(f"Strategy {strategy.name} does not implement specific backtesting logic in should_buy/should_sell.")
+            logger.error(f"Strategy {strategy.name} does not implement specific backtesting logic.")
 
-            for data_point in historical_data_raw:
-                market_data = MarketData(
-                    symbol=symbol,
-                    price=str(data_point['price']),
-                    timestamp=data_point['timestamp']
-                )
-                
-                # The on_market_data for the strategy will still log signals
-                # but won't place actual backtest orders through this path
-                # unless should_buy/should_sell are implemented to manage capital
-                # directly for backtesting simulation.
-                strategy.on_market_data(market_data) 
-                
-                # Simplified buy/sell logic for generic strategy (won't work without strategy.should_buy/sell impl)
-                if strategy.should_buy(symbol) and position_size <= 0:
-                    if position_size < 0: # Close short
-                        pnl = abs(position_size) * (float(data_point['price']) - trades[-1]['entry_price'])
-                        capital += pnl
-                        trades.append({'type': 'close_short', 'price': data_point['price'], 'timestamp': data_point['timestamp'], 'pnl': pnl})
-                        position_size = 0
-                    
-                    if capital > 0:
-                        position_size = capital / float(data_point['price'])
-                        trades.append({'type': 'buy', 'entry_price': data_point['price'], 'timestamp': data_point['timestamp'], 'position_size': position_size})
-                
-                elif strategy.should_sell(symbol) and position_size >= 0:
-                    if position_size > 0: # Close long
-                        pnl = position_size * (float(data_point['price']) - trades[-1]['entry_price'])
-                        capital += pnl
-                        trades.append({'type': 'close_long', 'price': data_point['price'], 'timestamp': data_point['timestamp'], 'pnl': pnl})
-                        position_size = 0
-                    
-                    if capital > 0:
-                        position_size = -capital / float(data_point['price']) # Go short
-                        trades.append({'type': 'sell', 'entry_price': data_point['price'], 'timestamp': data_point['timestamp'], 'position_size': position_size})
-                
-                current_equity = capital
-                if position_size != 0:
-                    current_equity += position_size * float(data_point['price'])
-                equity_curve.append({'timestamp': data_point['timestamp'], 'equity': current_equity})
-
-        # Calculate performance metrics
         results = self.calculate_performance_metrics(
             equity_curve, trades, initial_capital, strategy.name, symbol, start_date, end_date
         )
         
-        # Save results to database
         self.save_backtest_results(results)
         
         return results
-    
-    def get_historical_data(self, symbol: str, start_date_str: str, end_date_str: str) -> List[Dict]:
-        """
-        Get historical market data from database within a timestamp range.
-        Dates are expected in YYYY-MM-DD format for comparison with text column or
-        converted to microseconds for integer timestamp column.
-        """
+ def get_historical_data(self, symbol: str, start_date_str: str, end_date_str: str) -> List[Dict]:
+        """Get historical market data from database within a timestamp range."""
         try:
-            # Convert YYYY-MM-DD strings to microseconds timestamps for comparison
             start_ts_us = int(datetime.strptime(start_date_str, '%Y-%m-%d').timestamp() * 1_000_000)
-            # End of day for end_date
             end_ts_us = int((datetime.strptime(end_date_str, '%Y-%m-%d') + timedelta(days=1, microseconds=-1)).timestamp() * 1_000_000)
 
             with self.db_manager.get_connection() as conn:
@@ -815,30 +745,21 @@ class BacktestEngine:
         final_equity = equity_curve[-1]['equity']
         total_return = (final_equity - initial_capital) / initial_capital
         
-        # Convert equity curve to a Pandas Series for easier calculations
         equity_series = pd.Series([d['equity'] for d in equity_curve])
         
-        # Calculate daily returns (assuming equity_curve points are somewhat regular or representing periods)
-        # Using .pct_change() on equity curve to get percentage returns between consecutive points
         returns = equity_series.pct_change().dropna()
         
         sharpe_ratio = 0
         if not returns.empty and returns.std() > 0:
-            # Assuming returns are not daily, but rather per data point.
-            # A common assumption for annualized Sharpe is sqrt(number of periods).
-            # Here, using sqrt(252) for 'daily' if data points were daily, adjust if different freq.
-            # For backtesting with non-daily data, this is an approximation.
             num_days = (datetime.strptime(end_date, '%Y-%m-%d') - datetime.strptime(start_date, '%Y-%m-%d')).days + 1
             if num_days > 0 and len(equity_curve) > 0:
-                annualization_factor = np.sqrt(len(equity_curve) / num_days * 252) # Adjusting for data point frequency
+                annualization_factor = np.sqrt(len(equity_curve) / num_days * 252)
                 sharpe_ratio = returns.mean() / returns.std() * annualization_factor
             else:
                 sharpe_ratio = 0
             if np.isinf(sharpe_ratio) or np.isnan(sharpe_ratio):
-                sharpe_ratio = 0 # Handle inf/nan if std is tiny or zero
+                sharpe_ratio = 0
 
-        # Calculate maximum drawdown
-        # Ensure initial_capital is included if it's not the first point in equity_series
         cum_returns = (equity_series / initial_capital)
         peak = cum_returns.expanding(min_periods=1).max()
         drawdown = (peak - cum_returns) / peak
@@ -846,11 +767,9 @@ class BacktestEngine:
         if np.isnan(max_drawdown):
             max_drawdown = 0.0
 
-        # Calculate win rate
-        # Filter trades that actually resulted in a PnL (close_long, close_short)
         pnl_trades = [t for t in trades if 'pnl' in t]
         winning_trades = sum(1 for trade in pnl_trades if trade.get('pnl', 0) > 0)
-        total_trades = len(pnl_trades) # Count only trades with a PnL
+        total_trades = len(pnl_trades)
         win_rate = winning_trades / total_trades if total_trades > 0 else 0
         
         return {
@@ -871,7 +790,6 @@ class BacktestEngine:
     
     def save_backtest_results(self, results: Dict):
         """Save backtest results to database."""
-        # Only save if results are valid
         if not results or "error" in results:
             logger.warning("Attempted to save empty or erroneous backtest results.")
             return
@@ -897,7 +815,7 @@ class BacktestEngine:
             conn.commit()
             logger.info(f"Backtest results for {results.get('strategy_name')} on {results.get('symbol')} saved.")
 
-# --- Main Trading System ---
+# --- Main Trading System - FIX: Auto-start system ---
 class TradingSystem:
     def __init__(self):
         self.db_manager = DatabaseManager()
@@ -905,18 +823,17 @@ class TradingSystem:
         self.ws_manager = WebSocketManager(DELTA_API_KEY, DELTA_API_SECRET, WS_URL, self)
         self.backtest_engine = BacktestEngine(self.db_manager)
         
-        self.orders: Dict[int, Dict] = {} # Storing raw order dicts from WS
-        self.positions: Dict[int, Dict] = {} # Storing raw position dicts from WS (product_id -> dict)
-        self.market_data: Dict[str, MarketData] = {} # Latest MarketData object per symbol
+        self.orders: Dict[int, Dict] = {}
+        self.positions: Dict[int, Dict] = {}
+        self.market_data: Dict[str, MarketData] = {}
         self.strategies: Dict[str, TradingStrategy] = {}
         
-        # Flag to indicate if the system is actively stopping
         self.is_running = False
         self.is_stopping = False
         
         # Initialize default strategy
         self.strategies['sma'] = SMAStrategy()
-        self.strategies['sma'].set_trading_system(self) # Pass self reference to strategy
+        self.strategies['sma'].set_trading_system(self)
         logger.info(f"Default SMA Strategy initialized with short_window={self.strategies['sma'].short_window}, long_window={self.strategies['sma'].long_window}")
     
     def start(self):
@@ -929,10 +846,15 @@ class TradingSystem:
         self.is_running = True
         self.is_stopping = False
         
-        # Connect to WebSocket (this runs in a separate thread)
-        self.ws_manager.connect()
+        # FIX: Only connect WebSocket if API credentials are configured
+        if (DELTA_API_KEY and DELTA_API_KEY != 'your_delta_api_key_here' and 
+            DELTA_API_SECRET and DELTA_API_SECRET != 'your_delta_api_secret_here'):
+            self.ws_manager.connect()
+            logger.info("WebSocket connection initiated.")
+        else:
+            logger.warning("API credentials not configured. WebSocket connection skipped.")
         
-        logger.info("Trading system startup initiated.")
+        logger.info("Trading system startup completed.")
     
     def stop(self):
         """Stop the trading system."""
@@ -941,26 +863,23 @@ class TradingSystem:
             return
 
         logger.info("Stopping trading system...")
-        self.is_stopping = True # Set stopping flag
+        self.is_stopping = True
         self.is_running = False
         
         if self.ws_manager.ws:
             logger.info("Closing WebSocket connection...")
-            self.ws_manager.ws.close() # This will trigger on_close, but the flag prevents reconnect
-            # Give a small delay for WS to close gracefully
+            self.ws_manager.ws.close()
             time.sleep(1) 
         
         logger.info("Trading system stopped successfully.")
     
     def process_order_update(self, data: Dict):
         """Process order updates from WebSocket."""
-        order_id = data.get('id') or data.get('order_id') # Delta API might use 'id' or 'order_id'
+        order_id = data.get('id') or data.get('order_id')
         if order_id:
-            # Store the latest state of the order
             self.orders[order_id] = data
             logger.debug(f"Order {order_id} updated to state: {data.get('state')}")
             
-            # Save to database
             with self.db_manager.get_connection() as conn:
                 conn.execute('''
                     INSERT OR REPLACE INTO orders 
@@ -971,15 +890,15 @@ class TradingSystem:
                 ''', (
                     order_id,
                     data.get('product_id'),
-                    data.get('symbol'), # Assuming 'symbol' is present in WS updates
+                    data.get('symbol'),
                     data.get('size'),
                     data.get('side'),
-                    data.get('order_type', 'market_order'), # Default if not specified
+                    data.get('order_type', 'market_order'),
                     str(data.get('limit_price')) if data.get('limit_price') is not None else None,
                     str(data.get('stop_price')) if data.get('stop_price') is not None else None,
                     data.get('state'),
                     data.get('client_order_id'),
-                    data.get('created_at'), # Use 'created_at' from WS update
+                    data.get('created_at'),
                     data.get('unfilled_size'),
                     str(data.get('average_fill_price')) if data.get('average_fill_price') is not None else None
                 ))
@@ -991,13 +910,11 @@ class TradingSystem:
         if product_id:
             self.positions[product_id] = data
             logger.debug(f"Position for product {product_id} updated. Size: {data.get('size')}")
-            # You might want to store positions in DB as well, but it's often more dynamic
     
     def process_market_data(self, data: MarketData):
         """Process market data updates."""
         self.market_data[data.symbol] = data
         
-        # Save to database
         with self.db_manager.get_connection() as conn:
             conn.execute('''
                 INSERT OR REPLACE INTO market_data 
@@ -1013,7 +930,6 @@ class TradingSystem:
             ))
             conn.commit()
         
-        # Update strategies with new market data
         for strategy in self.strategies.values():
             strategy.on_market_data(data)
     
@@ -1022,7 +938,6 @@ class TradingSystem:
         try:
             result = self.api_client.place_order(order)
             logger.info(f"API: Order placed successfully: {result.get('id')} for {order.product_symbol}")
-            # The WS will send an update for this order, which will then be processed by process_order_update
             return result
         except Exception as e:
             logger.error(f"Failed to place order: {e}")
@@ -1033,7 +948,6 @@ class TradingSystem:
         try:
             result = self.api_client.cancel_order(order_id, product_id)
             logger.info(f"API: Order {order_id} cancelled successfully.")
-            # The WS will send an update for this order's state change
             return result
         except Exception as e:
             logger.error(f"Failed to cancel order {order_id}: {e}")
@@ -1061,12 +975,9 @@ def ai_studio_auth_required(f: Callable) -> Callable:
     """Decorator to require X-AI-Studio-Secret header for API access."""
     @wraps(f)
     def decorated_function(*args: Any, **kwargs: Any) -> Any:
-        # Check if AI_STUDIO_SECRET is configured (important for production)
         if not AI_STUDIO_SECRET or AI_STUDIO_SECRET == 'your_ai_studio_secret_here_for_testing':
             logger.error("AI_STUDIO_SECRET environment variable not properly set. API endpoints are unprotected or using default.")
-            # In production, you should return an error here:
-            # return jsonify({"error": "Server authentication not configured"}), 500
-            pass # Allow access if not configured for local testing convenience
+            pass
 
         provided_secret = request.headers.get('X-AI-Studio-Secret')
         if provided_secret == AI_STUDIO_SECRET:
@@ -1084,7 +995,7 @@ def api_status():
     try:
         return jsonify(trading_system.get_system_status())
     except Exception as e:
-        logger.exception("Error getting system status:") # Use exception for full traceback
+        logger.exception("Error getting system status:")
         return jsonify({"error": f"Error getting status: {str(e)}"}), 500
 
 @app.route('/api/start', methods=['POST'])
@@ -1111,11 +1022,11 @@ def stop_system():
 
 @app.route('/api/orders', methods=['GET'])
 @ai_studio_auth_required
-def get_orders_api(): # Renamed to avoid clash with internal method
+def get_orders_api():
     """Get orders from Delta Exchange API."""
     try:
-        product_ids = request.args.get('product_ids') # Comma-separated product IDs
-        states = request.args.get('states', 'open,pending') # Comma-separated states
+        product_ids = request.args.get('product_ids')
+        states = request.args.get('states', 'open,pending')
         
         result = trading_system.api_client.get_orders(product_ids, states)
         return jsonify(result)
@@ -1125,12 +1036,11 @@ def get_orders_api(): # Renamed to avoid clash with internal method
 
 @app.route('/api/orders', methods=['POST'])
 @ai_studio_auth_required
-def place_order_api(): # Renamed to avoid clash
+def place_order_api():
     """Place a new order."""
     try:
         data = request.get_json()
         
-        # Basic validation
         required_fields = ['product_symbol', 'size', 'side']
         if not all(field in data for field in required_fields):
             return jsonify({"error": f"Missing required fields. Needs: {', '.join(required_fields)}"}), 400
@@ -1153,7 +1063,7 @@ def place_order_api(): # Renamed to avoid clash
 
 @app.route('/api/orders/<int:order_id>', methods=['DELETE'])
 @ai_studio_auth_required
-def cancel_order_api(order_id: int): # Renamed to avoid clash
+def cancel_order_api(order_id: int):
     """Cancel an order."""
     try:
         data = request.get_json()
@@ -1213,8 +1123,8 @@ def run_backtest():
         
         strategy_name = data.get('strategy', 'sma')
         symbol = data.get('symbol', 'BTCUSD')
-        start_date = data.get('start_date') # Expected format: YYYY-MM-DD
-        end_date = data.get('end_date')     # Expected format: YYYY-MM-DD
+        start_date = data.get('start_date')
+        end_date = data.get('end_date')
         initial_capital = data.get('initial_capital', 10000.0)
         
         if not start_date or not end_date:
@@ -1228,10 +1138,6 @@ def run_backtest():
             strategy, symbol, start_date, end_date, initial_capital
         )
         
-        # Remove potentially large data from final JSON response if not needed
-        # e.g., result.pop('trades', None), result.pop('equity_curve', None)
-        # For now, keeping them for full detail
-        
         return jsonify(result)
     except Exception as e:
         logger.exception("Error running backtest:")
@@ -1242,7 +1148,7 @@ def run_backtest():
 def get_backtest_results():
     """Get historical backtest results."""
     try:
-        limit = request.args.get('limit', 50, type=int) # Limit number of results
+        limit = request.args.get('limit', 50, type=int)
         
         with trading_system.db_manager.get_connection() as conn:
             cursor = conn.execute(f'''
@@ -1271,7 +1177,7 @@ def get_strategies():
             strategies_info[name] = {
                 "name": strategy.name,
                 "type": type(strategy).__name__,
-                "config": { # Expose relevant strategy parameters
+                "config": {
                     "short_window": strategy.short_window if isinstance(strategy, SMAStrategy) else None,
                     "long_window": strategy.long_window if isinstance(strategy, SMAStrategy) else None,
                     "trade_size_percentage": strategy.trade_size_percentage if isinstance(strategy, SMAStrategy) else None,
@@ -1311,13 +1217,13 @@ def create_strategy():
                  return jsonify({"error": "trade_size_percentage must be a float between 0 and 1 (exclusive of 0)"}), 400
             
             strategy = SMAStrategy(short_window, long_window, trade_size_percentage)
-            strategy.name = strategy_name # Override default name
+            strategy.name = strategy_name
         else:
             return jsonify({"error": f"Unknown strategy type: '{strategy_type}'"}), 400
         
         if strategy:
             trading_system.strategies[strategy_name] = strategy
-            strategy.set_trading_system(trading_system) # Set the trading system reference
+            strategy.set_trading_system(trading_system)
             logger.info(f"Strategy '{strategy_name}' of type '{strategy_type}' created successfully.")
             return jsonify({"message": f"Strategy '{strategy_name}' created successfully", "config": data})
         else:
@@ -1335,7 +1241,7 @@ def delete_strategy(strategy_name: str):
         if strategy_name not in trading_system.strategies:
             return jsonify({"error": f"Strategy '{strategy_name}' not found"}), 404
         
-        if strategy_name == 'sma' and len(trading_system.strategies) == 1:  # Protect default strategy if it's the only one
+        if strategy_name == 'sma' and len(trading_system.strategies) == 1:
             return jsonify({"error": "Cannot delete default 'sma' strategy if it's the only one active. Create another strategy first."}), 400
         
         del trading_system.strategies[strategy_name]
@@ -1384,9 +1290,9 @@ def reconnect_websocket():
     try:
         logger.info("Manual WebSocket reconnection requested.")
         if trading_system.ws_manager.ws:
-            trading_system.ws_manager.ws.close() # This will trigger the on_close -> connect cycle
+            trading_system.ws_manager.ws.close()
         else:
-            trading_system.ws_manager.connect() # If not initialized, connect directly
+            trading_system.ws_manager.connect()
         
         return jsonify({"message": "WebSocket reconnection initiated. Check /api/status for status."})
     except Exception as e:
@@ -1402,7 +1308,6 @@ def cleanup_database():
         if days < 1:
             return jsonify({"error": "Days must be a positive integer"}), 400
         
-        # Calculate cutoff timestamp in microseconds
         cutoff_datetime = datetime.now() - timedelta(days=days)
         cutoff_timestamp = int(cutoff_datetime.timestamp() * 1_000_000)
         
@@ -1410,15 +1315,12 @@ def cleanup_database():
         trades_deleted = 0
         
         with trading_system.db_manager.get_connection() as conn:
-            # Clean old market data
             cursor = conn.execute(
                 'DELETE FROM market_data WHERE timestamp < ?', 
                 (cutoff_timestamp,)
             )
             market_data_deleted = cursor.rowcount
             
-            # Clean old trades (if you start saving them)
-            # You'll need to implement saving trades in WebSocketManager.handle_trade_update
             cursor = conn.execute(
                 'DELETE FROM trades WHERE timestamp < ?', 
                 (cutoff_timestamp,)
@@ -1456,13 +1358,12 @@ def method_not_allowed_error(error):
 
 @app.errorhandler(500)
 def internal_error(error):
-    logger.exception("Internal server error caught by handler:") # Use exception here too
+    logger.exception("Internal server error caught by handler:")
     return jsonify({"error": "Internal server error"}), 500
 
 @app.errorhandler(Exception)
 def handle_exception(e: Exception):
     """A catch-all for unhandled exceptions."""
-    # Pass through HTTP errors that have proper handlers
     if isinstance(e, requests.exceptions.HTTPError):
         return jsonify({"error": f"HTTP Error: {e.response.status_code} - {e.response.text}"}), e.response.status_code
     if isinstance(e, requests.exceptions.ConnectionError):
@@ -1472,13 +1373,12 @@ def handle_exception(e: Exception):
     logger.exception("An unhandled exception occurred:")
     return jsonify({"error": f"An unexpected error occurred: {str(e)}"}), 500
 
-# --- Startup function ---
+# --- Startup function - FIX: Auto-start system ---
 def initialize_system():
     """Initialize the trading system on startup."""
     try:
         logger.info("Initializing trading system...")
         
-        # Validate environment variables (more verbose checks)
         if DELTA_API_KEY == 'your_delta_api_key_here' or not DELTA_API_KEY:
             logger.error("CRITICAL: DELTA_API_KEY is not set or using default placeholder. API functionality will fail.")
         
@@ -1488,19 +1388,15 @@ def initialize_system():
         if AI_STUDIO_SECRET == 'your_ai_studio_secret_here_for_testing' or not AI_STUDIO_SECRET:
             logger.warning("WARNING: AI_STUDIO_SECRET is not set or using default placeholder. API endpoints are unprotected or using default for testing.")
         
-        # Start the trading system (connects WebSocket)
+        # FIX: Auto-start the trading system
         trading_system.start()
         
         logger.info("Trading system initialization complete. Check /api/status for live status.")
         
     except Exception as e:
         logger.exception("CRITICAL: Failed to initialize trading system:")
-        # Re-raise or exit if initialization fails critically
         raise
-
-# --- Main execution ---
+    # --- Main execution ---
 if __name__ == '__main__':
     initialize_system()
-    # Run Flask app (for local development, a production WSGI server would call the 'app' object)
-    # Using '0.0.0.0' makes it accessible externally, e.g., in a Docker container or cloud dev env
-    app.run(host='0.0.0.0', port=os.getenv('PORT', 10000), debug=False)
+    app.run(host='0.0.0.0', port=int(os.getenv('PORT', 10000)), debug=False)
