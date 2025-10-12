@@ -39,7 +39,7 @@ app = Flask(__name__)
 DELTA_API_KEY = os.getenv('DELTA_API_KEY', 'your_delta_api_key_here')
 DELTA_API_SECRET = os.getenv('DELTA_API_SECRET', 'your_delta_api_secret_here')
 AI_STUDIO_SECRET = os.getenv('AI_STUDIO_SECRET', 'your_ai_studio_secret_here_for_testing')
-ENVIRONMENT = os.getenv('ENVIRONMENT', 'testnet').strip().strip("'\"")
+ENVIRONMENT = os.getenv('ENVIRONMENT', 'production').strip().strip("'\"")
 
 ### NEW ###
 # Environment variables for automated login
