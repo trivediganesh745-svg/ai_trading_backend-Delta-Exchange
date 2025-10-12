@@ -601,7 +601,6 @@ class BacktestEngine:
         self.save_backtest_results(results)
         return results
 
-    # FIX: Corrected indentation for this method
     def get_historical_data(self, symbol: str, start_date_str: str, end_date_str: str) -> List[Dict]:
         """Get historical market data from database within a timestamp range."""
         try:
@@ -622,7 +621,6 @@ class BacktestEngine:
             logger.error(f"Error retrieving historical data from database: {e}")
             return []
     
-    # FIX: Corrected indentation for this method
     def calculate_performance_metrics(self, equity_curve: List[Dict], trades: List[Dict], 
                                     initial_capital: float, strategy_name: str, 
                                     symbol: str, start_date: str, end_date: str) -> Dict:
@@ -666,7 +664,6 @@ class BacktestEngine:
             'win_rate': win_rate, 'trades': trades, 'equity_curve': equity_curve
         }
     
-    # FIX: Corrected indentation for this method
     def save_backtest_results(self, results: Dict):
         """Save backtest results to database."""
         if not results or "error" in results:
@@ -817,6 +814,17 @@ def ai_studio_auth_required(f: Callable) -> Callable:
     return decorated_function
 
 # --- API Routes ---
+@app.route('/', methods=['GET'])
+def index():
+    """A simple landing page to confirm the API is running and satisfy health checks."""
+    return jsonify({
+        "message": "Welcome to the Trading System API.",
+        "status": "healthy",
+        "health_check_endpoint": "/api/health",
+        "api_status_endpoint": "/api/status (requires auth)",
+        "documentation_hint": "All functional endpoints are prefixed with /api/ and require authentication."
+    })
+
 @app.route('/api/status', methods=['GET'])
 @ai_studio_auth_required
 def api_status():
@@ -1100,6 +1108,7 @@ def bad_request_error(error):
 
 @app.errorhandler(404)
 def not_found_error(error):
+    # This will now only catch 404s for undefined routes other than '/'
     logger.warning(f"Endpoint not found: {request.path}")
     return jsonify({"error": "Endpoint not found"}), 404
 
