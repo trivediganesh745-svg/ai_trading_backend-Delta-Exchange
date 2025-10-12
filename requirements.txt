@@ -1,9 +1,8 @@
-setuptools
-wheel
+setuptools>=68.0.0  # Force a version compatible with Python 3.12+
 Flask==2.3.2
 requests==2.31.0
 websocket-client==1.6.1
 pandas==2.0.3
 numpy==1.25.1
 gunicorn==21.2.0
-geventwebsocket # Add this if using GeckoWebSocketWorker
+geventwebsocket
