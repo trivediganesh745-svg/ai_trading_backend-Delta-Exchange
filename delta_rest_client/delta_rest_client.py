@@ -1,4 +1,4 @@
-# delta_rest_client.py -- VERIFY THIS IS YOUR FILE'S CONTENT
+# delta_rest_client.py
 
 import time
 import hmac
@@ -6,8 +6,11 @@ import hashlib
 import json
 import requests
 from enum import Enum
+from decimal import Decimal, ROUND_HALF_UP
 
+# --- Helper Enums ---
 class OrderType(Enum):
+    """Enumeration for order types."""
     MARKET = 'market_order'
     LIMIT = 'limit_order'
     STOP_MARKET = 'stop_market_order'
@@ -16,11 +19,53 @@ class OrderType(Enum):
     MODIFY = 'modify_order'
 
 class TimeInForce(Enum):
+    """Enumeration for time in force options."""
     GTC = 'good_till_cancel'
     FOK = 'fill_or_kill'
     IOC = 'immediate_or_cancel'
 
+# --- Missing Helper Functions (Now Included) ---
+
+def create_order_format(product_id: int, size: int, side: str, limit_price: str, **kwargs) -> dict:
+    """
+    Creates a dictionary payload for placing a new order.
+    This function is included for compatibility with other parts of your project.
+    """
+    order_payload = {
+        'product_id': product_id,
+        'order_type': OrderType.LIMIT.value,
+        'size': size,
+        'side': side,
+        'limit_price': str(limit_price),
+        'time_in_force': TimeInForce.GTC.value
+    }
+    order_payload.update(kwargs)
+    return order_payload
+
+def cancel_order_format(product_id: int) -> dict:
+    """
+    Creates a dictionary payload for cancelling an order.
+    Delta's API requires the product_id in the body for cancellation.
+    This function is included for compatibility.
+    """
+    return {'product_id': product_id}
+
+def round_by_tick_size(price: float, tick_size: float) -> str:
+    """
+    Rounds a price to the nearest valid tick size for the exchange.
+    Example: round_by_tick_size(29000.7, 0.5) -> "29000.5"
+    This function is included for compatibility.
+    """
+    tick_size_decimal = Decimal(str(tick_size))
+    price_decimal = Decimal(str(price))
+    rounded_price = (price_decimal / tick_size_decimal).quantize(Decimal('1'), rounding=ROUND_HALF_UP) * tick_size_decimal
+    return str(rounded_price)
+
+
+# --- Main Client Class (Corrected and Improved) ---
 class DeltaRestClient:
+    """A robust REST client for interacting with the Delta Exchange API."""
+
     def __init__(self, base_url, api_key, api_secret, raise_for_status=False):
         if base_url.endswith('/'):
             base_url = base_url[:-1]
@@ -32,11 +77,7 @@ class DeltaRestClient:
 
     def _create_signature(self, method, path, body, timestamp):
         string_to_sign = f"{method.upper()}{path}{timestamp}{body}"
-        return hmac.new(
-            self.api_secret.encode('utf-8'),
-            string_to_sign.encode('utf-8'),
-            hashlib.sha256
-        ).hexdigest()
+        return hmac.new(self.api_secret.encode('utf-8'), string_to_sign.encode('utf-8'), hashlib.sha256).hexdigest()
 
     def _request(self, method, path, params=None, data=None, authenticated=True):
         url = self.base_url + path
@@ -60,7 +101,7 @@ class DeltaRestClient:
             if self.raise_for_status:
                 response.raise_for_status()
             if response.status_code == 204:
-                return {"status": "success"}
+                return {"status": "success", "message": "Request processed successfully."}
             return response.json()
         except requests.exceptions.HTTPError as e:
             raise e
@@ -69,7 +110,6 @@ class DeltaRestClient:
 
     # --- Market Data Endpoints ---
     def get_historical_candles(self, product_id, resolution, start=None, end=None):
-        """ THIS IS THE METHOD THAT IS MISSING ON YOUR SERVER """
         params = {'resolution': resolution}
         if start: params['start'] = start
         if end: params['end'] = end
@@ -102,7 +142,8 @@ class DeltaRestClient:
         return self._request('GET', f'/orders/{order_id}', params={'product_id': product_id})
 
     def cancel_order(self, product_id, order_id):
-        return self._request('DELETE', f'/orders/{order_id}', data={'product_id': product_id})
+        data = cancel_order_format(product_id) # Using the helper function for consistency
+        return self._request('DELETE', f'/orders/{order_id}', data=data)
 
     def get_orders(self, query=None):
         return self._request('GET', '/orders', params=query)
