@@ -110,45 +110,82 @@ class DeltaRestClient:
 
     # --- Market Data Endpoints ---
     def get_historical_candles(self, product_id, resolution, start=None, end=None):
+        """
+        Fetches historical candle (OHLCV) data for a product.
+        """
         params = {'resolution': resolution}
         if start: params['start'] = start
         if end: params['end'] = end
-        return self._request('GET', f"/products/{product_id}/candles", params=params, authenticated=False)
+        # CORRECTED PATH: Changed from "/products/{product_id}/candles" to "/history/candles/{product_id}"
+        return self._request('GET', f"/history/candles/{product_id}", params=params, authenticated=False)
 
     def get_l2_orderbook(self, product_id, depth=20):
+        """
+        Fetches the Level 2 order book for a product.
+        """
         return self._request('GET', f"/products/{product_id}/orderbook", params={'depth': depth}, authenticated=False)
         
     def get_ticker(self, product_id):
+        """
+        Fetches the ticker for a specific product.
+        """
         return self._request('GET', f"/products/{product_id}/ticker", authenticated=False)
 
     def get_product(self, product_id):
+        """
+        Fetches details for a specific product.
+        """
         return self._request('GET', f'/products/{product_id}', authenticated=False)
 
     # --- Account & Position Management Endpoints ---
     def get_position(self, product_id):
+        """
+        Fetches the user's position for a specific product.
+        """
         return self._request('GET', '/positions', params={'product_id': product_id})
 
     def get_balances(self, asset_id):
+        """
+        Fetches the user's wallet balance for a specific asset.
+        """
         return self._request('GET', f'/wallets/{asset_id}')
 
     def set_leverage(self, product_id, leverage):
+        """
+        Sets the leverage for a specific product.
+        """
         return self._request('POST', '/positions/leverage', data={'product_id': product_id, 'leverage': leverage})
 
     # --- Order Management Endpoints ---
     def place_order(self, **kwargs):
+        """
+        Places a new order.
+        """
         return self._request('POST', '/orders', data=kwargs)
         
     def get_order(self, product_id, order_id):
+        """
+        Retrieves a specific order by its ID.
+        """
         return self._request('GET', f'/orders/{order_id}', params={'product_id': product_id})
 
     def cancel_order(self, product_id, order_id):
+        """
+        Cancels a specific order.
+        """
         data = cancel_order_format(product_id) # Using the helper function for consistency
         return self._request('DELETE', f'/orders/{order_id}', data=data)
 
     def get_orders(self, query=None):
+        """
+        Fetches a list of orders based on a query.
+        """
         return self._request('GET', '/orders', params=query)
 
     def get_live_orders(self, query=None):
+        """
+        Fetches all live (open or pending) orders.
+        """
         if query is None: query = {}
         query['states'] = 'open,pending'
         return self.get_orders(query=query)
